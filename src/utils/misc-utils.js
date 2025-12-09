@@ -457,7 +457,9 @@ module.exports.normalizePlaceUrl = (url) => {
 
 /** @param {string} googleResponseString */
 module.exports.unstringifyGoogleXrhResponse = (googleResponseString) => {
-    return JSON.parse(googleResponseString.replace(')]}\'', ''));
+    // Remove the )]}' prefix and any following whitespace/newlines
+    let cleaned = googleResponseString.replace(/^\)\]\}\'[\s\n]*/, '').trim();
+    return JSON.parse(cleaned);
 };
 
 /** 

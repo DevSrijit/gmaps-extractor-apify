@@ -484,11 +484,13 @@ module.exports.enqueueAllPlaceDetails = async ({
         // Try multiple selectors for "end of results" indicator
         const noMoreResults = await page.$('.HlvSq') ||
             await page.$('[class*="end-of-list"]') ||
-            await page.$('span:contains("end of list")') ||
             await page.evaluate(() => {
+                // Check for "end of list" text using XPath or text search
+                const spans = Array.from(document.querySelectorAll('span'));
+                const hasEndOfList = spans.some(span => span.textContent && span.textContent.toLowerCase().includes('end of list'));
                 // Check if scrolling shows "You've reached the end" type message
                 const endMessages = document.body.innerText.match(/You've reached the end|No more results/i);
-                return !!endMessages;
+                return hasEndOfList || !!endMessages;
             });
         if (noMoreResults) {
 

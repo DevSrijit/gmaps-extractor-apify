@@ -55,24 +55,59 @@ const parseJsonResult = (placeData, isAdvertisement) => {
  * @param {boolean} isAllPacesNoSearch
  * @return {{ placesPaginationData: PlacePaginationData[], error: string | null }}
  */
- module.exports.parseSearchPlacesResponseBody = (responseBodyText, isAllPacesNoSearch) => {
+module.exports.parseSearchPlacesResponseBody = (responseBodyText, isAllPacesNoSearch) => {
     /** @type {PlacePaginationData[]} */
     const placesPaginationData = [];
 
-    const replaceString = isAllPacesNoSearch ? ")]}'" : '/*""*/';
+    // Handle both response formats: )]}' prefix and /*""*/ prefix
+    let jsonString = responseBodyText.trim();
 
-    const jsonString = responseBodyText
-        .replace(replaceString, '');
+    // Check if response is empty or looks like HTML/error
+    if (!jsonString || jsonString.length === 0) {
+        log.warning(`[SEARCH DEBUG]: Response body is empty`);
+        return {
+            placesPaginationData,
+            error: 'Response body is empty',
+        };
+    }
+
+    if (jsonString.startsWith('<!DOCTYPE') || jsonString.startsWith('<html') || jsonString.startsWith('<HTML')) {
+        log.warning(`[SEARCH DEBUG]: Response appears to be HTML instead of JSON. First 500 chars: ${jsonString.substring(0, 500)}`);
+        return {
+            placesPaginationData,
+            error: 'Response body appears to be HTML instead of JSON',
+        };
+    }
+
+    // Try to parse as-is first (might be wrapped in {"c":0,"d":"..."} format)
     let jsonObject;
     try {
         jsonObject = JSON.parse(jsonString);
     } catch (e) {
-        // Log the first 500 chars of response to understand what we're getting
-        log.debug(`[SEARCH DEBUG]: Failed to parse JSON. Response starts with: ${responseBodyText.substring(0, 500)}`);
-        return {
-            placesPaginationData,
-            error: 'Response body doesn\'t contain a valid JSON',
-        };
+        // If that fails, try removing prefixes
+        if (jsonString.startsWith(')]}\'')) {
+            jsonString = jsonString.replace(')]}\'', '');
+        } else if (jsonString.startsWith('/*""*/')) {
+            jsonString = jsonString.replace('/*""*/', '');
+        }
+
+        try {
+            jsonObject = JSON.parse(jsonString);
+        } catch (e2) {
+            // Log detailed error information
+            const error = /** @type {Error} */ (e2);
+            log.warning(`[SEARCH DEBUG]: Failed to parse JSON. Error: ${error.message}`);
+            log.warning(`[SEARCH DEBUG]: Response length: ${responseBodyText.length}, starts with: ${responseBodyText.substring(0, 200)}`);
+            log.warning(`[SEARCH DEBUG]: Response ends with: ${responseBodyText.substring(Math.max(0, responseBodyText.length - 200))}`);
+            // Check if response might be truncated
+            if (jsonString.length > 0 && !jsonString.endsWith('}') && !jsonString.endsWith(']')) {
+                log.warning(`[SEARCH DEBUG]: Response might be truncated (doesn't end with } or ])`);
+            }
+            return {
+                placesPaginationData,
+                error: `Response body doesn't contain a valid JSON: ${error.message}`,
+            };
+        }
     }
 
     // TODO: Maybe split this into more try/catches
@@ -86,19 +121,47 @@ const parseJsonResult = (placeData, isAdvertisement) => {
             }
             return { placesPaginationData, error: null };
         }
-        
+
         // Debug: Check what's in jsonObject
-        log.debug(`[SEARCH DEBUG]: jsonObject keys: ${Object.keys(jsonObject || {}).join(', ')}`);
-        
-        if (!jsonObject.d) {
+        log.debug(`[SEARCH DEBUG]: jsonObject type: ${Array.isArray(jsonObject) ? 'array' : typeof jsonObject}, keys: ${Object.keys(jsonObject || {}).join(', ')}`);
+
+        let data;
+        if (jsonObject.d) {
+            // Response is wrapped: {"c":0,"d":")]}'\n[..."}
+            try {
+                data = unstringifyGoogleXrhResponse(jsonObject.d);
+                log.debug(`[SEARCH DEBUG]: Successfully unstringified jsonObject.d, data type: ${Array.isArray(data) ? 'array' : typeof data}`);
+            } catch (e) {
+                const error = /** @type {Error} */ (e);
+                log.warning(`[SEARCH DEBUG]: Failed to unstringify jsonObject.d: ${error.message}`);
+                log.warning(`[SEARCH DEBUG]: jsonObject.d type: ${typeof jsonObject.d}, length: ${typeof jsonObject.d === 'string' ? jsonObject.d.length : 'N/A'}`);
+                log.warning(`[SEARCH DEBUG]: jsonObject.d preview: ${typeof jsonObject.d === 'string' ? jsonObject.d.substring(0, 500) : 'N/A'}`);
+
+                // Try to manually parse by removing prefix and trimming
+                try {
+                    let cleaned = jsonObject.d;
+                    if (typeof cleaned === 'string') {
+                        cleaned = cleaned.replace(/^\)\]\}\'[\s\n]*/, '').trim();
+                        data = JSON.parse(cleaned);
+                        log.debug(`[SEARCH DEBUG]: Successfully parsed jsonObject.d after manual cleaning`);
+                    } else {
+                        throw new Error('jsonObject.d is not a string');
+                    }
+                } catch (e2) {
+                    const error2 = /** @type {Error} */ (e2);
+                    log.warning(`[SEARCH DEBUG]: Manual parsing also failed: ${error2.message}`);
+                    // Return error instead of using jsonObject directly (which won't have place data)
+                    return {
+                        placesPaginationData,
+                        error: `Failed to parse wrapped response data: ${error.message}. Manual parse also failed: ${error2.message}`,
+                    };
+                }
+            }
+        } else {
             // Google might have changed the response format - the data might be directly in jsonObject
-            log.warning(`[SEARCH DEBUG]: jsonObject.d is missing. Trying alternative parsing...`);
-            // Try to find place data directly in the response
-            // Save the response for debugging
-            log.debug(`[SEARCH DEBUG]: Full response structure: ${JSON.stringify(jsonObject).substring(0, 1000)}`);
+            log.debug(`[SEARCH DEBUG]: jsonObject.d is missing. Using jsonObject directly.`);
+            data = jsonObject;
         }
-        
-        const data = jsonObject.d ? unstringifyGoogleXrhResponse(jsonObject.d) : jsonObject;
 
         // We are paring ads but seems Google is not showing them to the scraper right now
         const ads = (data[2] && data[2][1] && data[2][1][0]) || [];
@@ -116,56 +179,150 @@ const parseJsonResult = (placeData, isAdvertisement) => {
         // Google has changed their response format - we need to find the places array
         // Try multiple possible locations for the organic results
         let organicResults = null;
-        
+
         // Debug: Log the structure to understand what Google is returning
-        log.debug(`[SEARCH DEBUG]: data structure keys/indices: ${JSON.stringify(Object.keys(data || {}))}`);
-        
-        // New format (2024+): Places might be in different locations
-        // Try the old location first
+        log.debug(`[SEARCH DEBUG]: data structure type: ${Array.isArray(data) ? 'array' : typeof data}, length/keys: ${Array.isArray(data) ? data.length : Object.keys(data || {}).length}`);
+
+        // After unstringifying jsonObject.d, data is an array like:
+        // [[\"Real estate agents in Beverly Hills, CA\",...], [null, [placeDataArray1]], [null, [placeDataArray2]], ...]
+        // Where data[0] is metadata and later entries are [null, [placeDataArray]] format
+
+        // Try the old location first (for backward compatibility)
         if (data?.[0]?.[1] && Array.isArray(data[0][1])) {
             organicResults = data[0][1];
             log.debug(`[SEARCH DEBUG]: Found results at data[0][1], length: ${organicResults.length}`);
         }
-        
-        // If not found or empty, try alternative locations
-        if (!organicResults || organicResults.length === 0) {
-            // Try data[0][0][1] - some responses nest differently
-            if (data?.[0]?.[0]?.[1] && Array.isArray(data[0][0][1])) {
-                organicResults = data[0][0][1];
-                log.debug(`[SEARCH DEBUG]: Found results at data[0][0][1], length: ${organicResults.length}`);
+
+        // If not found, look for [null, [placeDataArray]] entries directly in data array
+        // After unstringifying jsonObject.d, data is an array where:
+        // - data[0] is usually metadata like ["Real estate agents in Beverly Hills, CA",...]
+        // - Later entries are place entries like [null, [placeDataArray]]
+        if ((!organicResults || organicResults.length === 0) && Array.isArray(data)) {
+            const foundPlaces = [];
+            // Skip data[0] as it's usually metadata (search query, etc.)
+            for (let i = 1; i < data.length; i++) {
+                const item = data[i];
+                if (Array.isArray(item)) {
+                    // Check if this is a place entry: [null, [placeDataArray]]
+                    // where placeDataArray has coordinates at index [9]
+                    if (item.length === 2 && item[0] === null && Array.isArray(item[1])) {
+                        const placeDataArray = item[1];
+                        // Check if it has coordinates (index 9) - this indicates it's place data
+                        // Also check for placeId at index 78 to be more certain
+                        if (placeDataArray[9] && Array.isArray(placeDataArray[9]) && placeDataArray[9].length >= 2) {
+                            // Additional validation: check for placeId or other place indicators
+                            if (placeDataArray[78] || placeDataArray.length > 50) {
+                                foundPlaces.push(placeDataArray);
+                                log.debug(`[SEARCH DEBUG]: Found place at data[${i}][1] (wrapped format)`);
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Also check if item itself is place data (has coordinates at index 9)
+                    if (item[9] && Array.isArray(item[9]) && item[9].length >= 2 && item.length > 50) {
+                        // Additional validation: check for placeId
+                        if (item[78] || item.length > 100) {
+                            foundPlaces.push(item);
+                            log.debug(`[SEARCH DEBUG]: Found place at data[${i}] (direct format)`);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            if (foundPlaces.length > 0) {
+                organicResults = foundPlaces;
+                log.debug(`[SEARCH DEBUG]: Found ${foundPlaces.length} places in data array entries`);
             }
         }
-        
-        if (!organicResults) {
-            log.warning(`[SEARCH]: Could not find organic results in response. Data structure: ${JSON.stringify(data).substring(0, 500)}`);
+
+        // If still not found, try recursive search as fallback
+        if ((!organicResults || organicResults.length === 0) && Array.isArray(data)) {
+            const findPlacesRecursively = (arr, depth = 0, maxDepth = 6, foundPlaces = []) => {
+                if (depth > maxDepth) return foundPlaces;
+                if (!Array.isArray(arr)) return foundPlaces;
+
+                for (let i = 0; i < arr.length; i++) {
+                    const item = arr[i];
+                    if (Array.isArray(item)) {
+                        // Check if this is a place entry: [null, [placeDataArray]]
+                        if (item.length === 2 && item[0] === null && Array.isArray(item[1])) {
+                            const placeDataArray = item[1];
+                            if (placeDataArray[9] && Array.isArray(placeDataArray[9]) && placeDataArray[9].length >= 2) {
+                                foundPlaces.push(placeDataArray);
+                                continue;
+                            }
+                        }
+
+                        // Also check if item itself is place data
+                        if (item[9] && Array.isArray(item[9]) && item[9].length >= 2 && item.length > 50) {
+                            foundPlaces.push(item);
+                            continue;
+                        }
+
+                        // Recurse deeper
+                        findPlacesRecursively(item, depth + 1, maxDepth, foundPlaces);
+                    }
+                }
+                return foundPlaces;
+            };
+
+            const foundPlaces = findPlacesRecursively(data);
+            if (foundPlaces.length > 0) {
+                organicResults = foundPlaces;
+                log.debug(`[SEARCH DEBUG]: Found ${foundPlaces.length} places recursively in nested structure`);
+            }
+        }
+
+        if (!organicResults || organicResults.length === 0) {
+            // Some responses are very short metadata responses (e.g., )]}'\n[[[2],[3],[5],[6],[7],[9],[10]]])
+            // These don't contain place data, so this is expected
+            if (Array.isArray(data) && data.length < 5) {
+                log.debug(`[SEARCH DEBUG]: Response appears to be a short metadata response (length: ${data.length}), no places expected`);
+            } else {
+                log.warning(`[SEARCH]: Could not find organic results in response. Data structure preview: ${JSON.stringify(data).substring(0, 1000)}`);
+            }
             return { placesPaginationData, error: null };
         }
-        
-        // If the search goes to search results, the first one is not a place
-        // If the search goes to a place directly, the first one is that place
-        if (organicResults.length > 1) {
-            organicResults = organicResults.slice(1)
-        }
-        organicResults.forEach((/** @type {any} */ result ) => {
-            // Try multiple indices for place data - Google changes these periodically
-            // Old format: result[14], New formats might use different indices
-            let placeData = parseJsonResult(result[14], false);
-            
+
+        // Extract place data from results
+        organicResults.forEach((/** @type {any} */ result, index) => {
+            // Skip the first entry if it's metadata (search query, etc.)
+            if (index === 0 && typeof result === 'string' && result.length > 50) {
+                return; // Skip metadata entries
+            }
+
+            // Try to parse the result as place data
+            // The result should be the place data array directly
+            let placeData = parseJsonResult(result, false);
+
             if (!placeData) {
-                // Try alternative indices that Google has used
-                for (const idx of [11, 13, 15, 22]) {
+                // If result is wrapped in [null, [placeDataArray]], try index 1
+                if (Array.isArray(result) && result.length === 2 && result[0] === null && Array.isArray(result[1])) {
+                    placeData = parseJsonResult(result[1], false);
+                    if (placeData) {
+                        log.debug(`[SEARCH DEBUG]: Found place data at result[1] (wrapped format)`);
+                    }
+                }
+            }
+
+            if (!placeData) {
+                // Try multiple indices for place data - Google changes these periodically
+                // Old format: result[14], New formats might use different indices
+                for (const idx of [14, 11, 13, 15, 22, 0, 1]) {
                     placeData = parseJsonResult(result[idx], false);
                     if (placeData) {
-                        log.debug(`[SEARCH DEBUG]: Found place data at index ${idx} instead of 14`);
+                        log.debug(`[SEARCH DEBUG]: Found place data at index ${idx}`);
                         break;
                     }
                 }
             }
-            
+
             if (placeData) {
                 placesPaginationData.push(placeData);
             } else {
-                log.warning(`[SEARCH]: Cannot find place data in search. Result keys: ${result ? Object.keys(result).slice(0, 20).join(',') : 'null'}`);
+                log.warning(`[SEARCH]: Cannot find place data in search result at index ${index}. Result type: ${Array.isArray(result) ? 'array' : typeof result}, length: ${Array.isArray(result) ? result.length : 'N/A'}`);
             }
         });
     } catch (e) {
@@ -211,7 +368,7 @@ module.exports.extractPageData = async ({ page, jsonData }) => {
             title: $(placeTitleSel).text().trim(),
             subTitle: $(`*:has(> ${placeTitleSel})+h2`).first().text().trim() || null,
             price: $("span[aria-label^='Price: ']").text().trim() || null,
-            menu: $("button[aria-label='Menu']").text().replace(/Menu/g,'').trim() || null,
+            menu: $("button[aria-label='Menu']").text().replace(/Menu/g, '').trim() || null,
             // Getting from JSON now
             // totalScore: $('span.section-star-display').eq(0).text().trim(),
             categoryName: $('[jsaction="pane.rating.category"]').text().trim() || categoryName,
@@ -378,7 +535,7 @@ module.exports.extractAdditionalInfo = async ({ page, placeUrl, jsonData }) => {
         log.info(`[PLACE]: Additional info scraped from jsonData for page: ${placeUrl}`);
         return result;
     }
-    await page.waitForSelector('button[jsaction*="pane.attributes.expand"]', { timeout: 5000 }).catch(() => {});
+    await page.waitForSelector('button[jsaction*="pane.attributes.expand"]', { timeout: 5000 }).catch(() => { });
     const button = await page.$('button[jsaction*="pane.attributes.expand"]');
     if (button) {
         try {
@@ -434,10 +591,10 @@ module.exports.extractAdditionalInfo = async ({ page, placeUrl, jsonData }) => {
         if (hotel_avail_amenities.length > 0) {
             const values = [];
             for (let name of hotel_avail_amenities) {
-                values.push({[name]: true})
+                values.push({ [name]: true })
             }
             for (let name of hotel_disabled_amenities) {
-                values.push({[name]: false})
+                values.push({ [name]: false })
             }
             log.info(`[PLACE]: Additional info (Amenities) scraped from HTML for page: ${placeUrl}`);
             return { "Amenities": values };
@@ -503,7 +660,7 @@ const extractAdditionalInfoBasicFromJson = ({ jsonData }) => {
             if (typeof option?.[1] !== 'string') {
                 throw new TypeError("wrong format for option name");
             }
-            if (typeof option?.[2]?.[2]?.[0] === 'number'){
+            if (typeof option?.[2]?.[2]?.[0] === 'number') {
                 return { [option[1]]: option[2][2][0] == 1 }
             }
             // accepted types of credit cards are listed in JSON
@@ -525,10 +682,10 @@ const extractAdditionalInfoBasicFromJson = ({ jsonData }) => {
                 }
                 const wifiOptions = option?.[2].slice(3)
                 return wifiOptions.map((/** @type {any[]} */ wifiOption) => {
-                    if(typeof wifiOption?.[2] != "string") {
+                    if (typeof wifiOption?.[2] != "string") {
                         throw new TypeError(`wrong format for wifi option`);
                     }
-                    return {[wifiOption[2]]: true}
+                    return { [wifiOption[2]]: true }
                 });
             }
             throw new TypeError(`${option[1]}: wrong format for option value`);
