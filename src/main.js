@@ -200,12 +200,22 @@ Apify.main(async () => {
     // We enqueue small part of initial requests now and the rest in background
     await setUpEnqueueingInBackground(startRequests, requestQueue, maxCrawledPlacesTracker);
 
-    const proxyConfiguration = await Apify.createProxyConfiguration(proxyConfig);
+    // Only create proxy configuration if proxyConfig is provided and we're on Apify platform
+    // For local runs without proxy, we skip this
+    let proxyConfiguration = undefined;
+    if (proxyConfig && (proxyConfig.useApifyProxy || proxyConfig.proxyUrls)) {
+        try {
+            proxyConfiguration = await Apify.createProxyConfiguration(proxyConfig);
+        } catch (e) {
+            log.warning(`Proxy configuration failed: ${e.message}. Running without proxy.`);
+            proxyConfiguration = undefined;
+        }
+    }
 
     /** @type {typedefs.CrawlerOptions} */
     const crawlerOptions = {
         requestQueue,
-        proxyConfiguration,
+        ...(proxyConfiguration && { proxyConfiguration }),
         maxConcurrency,
         useSessionPool: true,
         persistCookiesPerSession: true,

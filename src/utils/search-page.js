@@ -44,5 +44,20 @@ module.exports.searchInputBoxFlow = async (page, searchString) => {
  * @param {Puppeteer.Page} page 
  */
  module.exports.getPlacesCountInUI = async (page) => {
-    return page.evaluate(() => $('[role="article"]').length);
+    return page.evaluate(() => {
+        // Try multiple selectors to count places in UI
+        const articleCount = $('[role="article"]').length;
+        if (articleCount > 0) return articleCount;
+        
+        // Fallback selectors
+        const linkCount = $('a.hfpxzc').length;
+        if (linkCount > 0) return linkCount;
+        
+        const feedItems = $('[role="feed"] > div').length;
+        if (feedItems > 0) return feedItems;
+        
+        // Count any place links
+        const placeLinks = $('a[href*="/maps/place/"]').length;
+        return placeLinks;
+    });
 }

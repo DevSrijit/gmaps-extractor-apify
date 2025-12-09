@@ -3,6 +3,10 @@
 # You can also use any other image from Docker Hub.
 FROM apify/actor-node-puppeteer-chrome:16
 
+# Tell puppeteer to skip downloading Chrome and use the one from the base image
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome
+
 # Second, copy just package.json and package-lock.json since it should be
 # the only file that affects "npm install" in the next step, to speed up the build
 COPY package*.json ./

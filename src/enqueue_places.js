@@ -11,13 +11,62 @@ const ExportUrlsDeduper = require('./helper-classes/export-urls-deduper'); // es
 
 const { log, sleep } = Apify.utils;
 const { MAX_PLACES_PER_PAGE, PLACE_TITLE_SEL, NO_RESULT_XPATH, LABELS } = require('./consts');
-const { parseZoomFromUrl, moveMouseThroughPage, getScreenshotPinsFromExternalActor, waiter, abortRunIfReachedMaxPlaces } = require('./utils/misc-utils');
+const { parseZoomFromUrl, moveMouseThroughPage, getScreenshotPinsFromExternalActor, waiter, abortRunIfReachedMaxPlaces, delay, $x } = require('./utils/misc-utils');
 const { searchInputBoxFlow, getPlacesCountInUI } = require('./utils/search-page');
 const { parseSearchPlacesResponseBody } = require('./place-extractors/general');
 const { checkInPolygon } = require('./utils/polygon');
 
 const SEARCH_WAIT_TIME_MS = 30000;
 const CHECK_LOAD_OUTCOMES_EVERY_MS = 500;
+
+/**
+ * Extracts place data directly from DOM elements as a fallback
+ * when XHR response parsing fails
+ * @param {Puppeteer.Page} page
+ * @returns {Promise<Array<{placeId: string | null, href: string, title: string}>>}
+ */
+const extractPlacesFromDOM = async (page) => {
+    return page.evaluate(() => {
+        const places = [];
+        // Try multiple selectors that Google has used for place links
+        const selectors = [
+            'a.hfpxzc',                    // Traditional selector
+            'a[href*="/maps/place/"]',      // Links containing place URL
+            '[role="article"] a[href*="maps"]', // Article-based results
+            'div[role="feed"] a[href*="/maps/place/"]' // Feed-based results
+        ];
+
+        let links = [];
+        for (const selector of selectors) {
+            links = document.querySelectorAll(selector);
+            if (links.length > 0) {
+                console.log(`[DOM EXTRACT]: Found ${links.length} places using selector: ${selector}`);
+                break;
+            }
+        }
+
+        links.forEach((link) => {
+            const href = link.getAttribute('href') || '';
+            // Extract place ID from URL if present
+            const placeIdMatch = href.match(/place_id[=:]([^&/]+)/) ||
+                href.match(/data=.*!1s([^!]+)/) ||
+                href.match(/\/maps\/place\/[^/]+\/([^/]+)/);
+            const placeId = placeIdMatch ? placeIdMatch[1] : null;
+
+            // Get title from aria-label or nearby heading
+            const title = link.getAttribute('aria-label') ||
+                link.querySelector('[role="heading"]')?.textContent ||
+                link.closest('[role="article"]')?.querySelector('[role="heading"]')?.textContent ||
+                '';
+
+            if (href) {
+                places.push({ placeId, href, title: title.trim() });
+            }
+        });
+
+        return places;
+    });
+};
 
 /**
  * This handler waiting for response from xhr and enqueue places from the search response boddy.
@@ -41,11 +90,20 @@ const enqueuePlacesFromResponse = (options) => {
         placesCache, stats, maxCrawledPlacesTracker, exportUrlsDeduper, crawler } = options;
     return async (response, pageStats) => {
         const url = response.url();
-        const isSearchPage = url.match(/google\.[a-z.]+\/search/);
+
+        // Debug: Log all XHR URLs to understand what endpoints Google uses
+        if (url.includes('google.com') && (url.includes('/maps') || url.includes('search'))) {
+            log.debug(`[XHR DEBUG]: Captured URL: ${url.substring(0, 200)}`);
+        }
+
+        // Match both old and new Google Maps API endpoints
+        const isSearchPage = url.match(/google\.[a-z.]+\/search/) || url.match(/google\.[a-z.]+\/maps\/rpc/);
         const isDetailPreviewPage = !!url.match(/google\.[a-z.]+\/maps\/preview\/place/);
         if (!isSearchPage && !isDetailPreviewPage) {
             return;
         }
+
+        log.info(`[XHR DEBUG]: Processing response from: ${url.substring(0, 200)}`);
 
         let responseBody;
         let responseStatus;
@@ -58,7 +116,16 @@ const enqueuePlacesFromResponse = (options) => {
                 log.warning(`Response status is not 200, it is ${responseStatus}. This might mean the response is blocked`);
             }
             responseBody = await response.text();
+
+            // Save raw response for debugging
+            const debugKey = `RAW-RESPONSE-${Date.now()}`;
+            await Apify.setValue(debugKey, responseBody.substring(0, 50000), { contentType: 'text/plain' });
+            log.debug(`[XHR DEBUG]: Saved raw response to ${debugKey}`);
+
             const { placesPaginationData, error } = parseSearchPlacesResponseBody(responseBody, isDetailPreviewPage);
+
+            log.info(`[XHR DEBUG]: Parsed ${placesPaginationData.length} places from response`);
+
             if (error) {
                 // This way we pass the error to the synchronous context where we can throw to retry
                 pageStats.error = { message: error, responseStatus, responseBody };
@@ -107,7 +174,7 @@ const enqueuePlacesFromResponse = (options) => {
                     }
                     const wasAlreadyPushed = exportUrlsDeduper?.testDuplicateAndAdd(placePaginationData.placeId);
                     if (!wasAlreadyPushed) {
-                        
+
                         maxCrawledPlacesTracker.setScraped();
                         pushed++;
                         await Apify.pushData({
@@ -128,19 +195,19 @@ const enqueuePlacesFromResponse = (options) => {
                     }
 
                     const { wasAlreadyPresent } = await requestQueue.addRequest({
-                            url: placeUrl,
-                            uniqueKey: placePaginationData.placeId,
-                            userData: {
-                                label: LABELS.PLACE,
-                                searchString,
-                                rank,
-                                searchPageUrl,
-                                coords: placePaginationData.coords,
-                                addressParsed: placePaginationData.addressParsed,
-                                isAdvertisement: placePaginationData.isAdvertisement,
-                                categories: placePaginationData.categories
-                            },
+                        url: placeUrl,
+                        uniqueKey: placePaginationData.placeId,
+                        userData: {
+                            label: LABELS.PLACE,
+                            searchString,
+                            rank,
+                            searchPageUrl,
+                            coords: placePaginationData.coords,
+                            addressParsed: placePaginationData.addressParsed,
+                            isAdvertisement: placePaginationData.isAdvertisement,
+                            categories: placePaginationData.categories
                         },
+                    },
                         { forefront: true });
                     if (!wasAlreadyPresent) {
                         enqueued++;
@@ -158,7 +225,7 @@ const enqueuePlacesFromResponse = (options) => {
             pageStats.totalEnqueued += enqueued;
             pageStats.pushed = pushed;
             pageStats.totalPushed += pushed;
-            
+
 
             const numberOfAds = placesPaginationData.filter((item) => item.isAdvertisement).length;
             // Detail preview page goes one by one so should be logged after
@@ -187,7 +254,7 @@ const enqueuePlacesFromResponse = (options) => {
 const waitForSearchResults = async (page) => {
     const start = Date.now();
     // All possible outcomes should be unique, when outcomes happens, we return it
-    for (;;) {
+    for (; ;) {
         if (Date.now() - start > SEARCH_WAIT_TIME_MS) {
             return { noOutcomeLoaded: true };
         }
@@ -197,7 +264,7 @@ const waitForSearchResults = async (page) => {
             return { isBadQuery: true };
         }
 
-        const hasNoResults = await page.$x(NO_RESULT_XPATH);
+        const hasNoResults = await $x(page, NO_RESULT_XPATH);
         if (hasNoResults.length > 0) {
             return { hasNoResults: true };
         }
@@ -207,13 +274,24 @@ const waitForSearchResults = async (page) => {
             return { isPlaceDetail: true }
         }
 
-        // This is the happy path
-        const hasSearchResults = await page.$$('a.hfpxzc');
-        if (hasSearchResults.length > 0) {
-            return { hasResults: true };
+        // This is the happy path - try multiple selectors for search results
+        // Google changes these periodically
+        const searchResultSelectors = [
+            'a.hfpxzc',                          // Traditional selector
+            '[role="feed"] [role="article"]',    // Feed-based results  
+            'div[role="article"]',               // Article cards
+            'a[href*="/maps/place/"]',           // Links to places
+        ];
+
+        for (const selector of searchResultSelectors) {
+            const hasSearchResults = await page.$$(selector);
+            if (hasSearchResults.length > 0) {
+                log.debug(`[SEARCH]: Found ${hasSearchResults.length} results using selector: ${selector}`);
+                return { hasResults: true };
+            }
         }
 
-        await page.waitForTimeout(CHECK_LOAD_OUTCOMES_EVERY_MS);
+        await delay(CHECK_LOAD_OUTCOMES_EVERY_MS);
     }
 }
 
@@ -230,21 +308,23 @@ const waitForSearchResults = async (page) => {
  * }} options
  */
 module.exports.enqueueAllPlaceDetails = async ({
-                                          page,
-                                          searchString,
-                                          requestQueue,
-                                          request,
-                                          crawler,
-                                          scrapingOptions,
-                                          helperClasses,
-                                      }) => {
+    page,
+    searchString,
+    requestQueue,
+    request,
+    crawler,
+    scrapingOptions,
+    helperClasses,
+}) => {
     const { geolocation, maxAutomaticZoomOut, exportPlaceUrls } = scrapingOptions;
     const { stats, placesCache, maxCrawledPlacesTracker, exportUrlsDeduper } = helperClasses;
 
     // The error property is a way to propagate errors from the response handler to this synchronous context
     /** @type {typedefs.PageStats} */
-    const pageStats = { error: null, isDataPage: false, enqueued: 0, pushed: 0, totalEnqueued: 0,
-        totalPushed: 0, found: 0, totalFound: 0, pageNum: 1 }
+    const pageStats = {
+        error: null, isDataPage: false, enqueued: 0, pushed: 0, totalEnqueued: 0,
+        totalPushed: 0, found: 0, totalFound: 0, pageNum: 1
+    }
 
     const responseHandler = enqueuePlacesFromResponse({
         page,
@@ -276,7 +356,7 @@ module.exports.enqueueAllPlaceDetails = async ({
         }
         // if specified by user input call OCR to recognize pins
         const isPinsFromOCR = searchString.endsWith('_ocr');
-        const pinPositions =  isPinsFromOCR ? await getScreenshotPinsFromExternalActor(page) : [];
+        const pinPositions = isPinsFromOCR ? await getScreenshotPinsFromExternalActor(page) : [];
         if (isPinsFromOCR && !pinPositions?.length) {
             // no OCR results, do not fall back to regular mouseMove
             return;
@@ -321,7 +401,7 @@ module.exports.enqueueAllPlaceDetails = async ({
     if (hasNoResults) {
         log.warning(`${logBase} Finishing search because there are no results for this query - ${request.url}`);
         return;
-    } 
+    }
 
     // If we search for very specific place, it redirects us to the place page right away
     // Unofortunately, this page lacks the JSON data as we need it
@@ -329,21 +409,89 @@ module.exports.enqueueAllPlaceDetails = async ({
     if (isPlaceDetail) {
         log.warning(`${logBase} Finishing scroll because we loaded a single place page directly - ${request.url}`);
         // We must wait a bit for the response to be intercepted
-        await waiter(() => pageStats.totalFound > 0, { timeout: 60000, timeoutErrorMeesage: 'Could not enqueue single place in time'})
+        await waiter(() => pageStats.totalFound > 0, { timeout: 60000, timeoutErrorMeesage: 'Could not enqueue single place in time' })
         return;
     }
 
     let numberOfEmptyScrolls = 0;
     let lastNumberOfResultsLoadedTotally = 0;
+    let useDOMFallback = false;  // Flag to switch to DOM extraction if XHR fails
 
     // Main scrolling/enqueueing loop starts
-    for (;;) {
+    for (; ;) {
         const logBaseScroll = `${logBase}[SCROLL: ${pageStats.pageNum}]:`
+
+        // If XHR parsing is not working, try DOM extraction as fallback
+        if (pageStats.pageNum > 2 && pageStats.totalFound === 0) {
+            log.warning(`${logBaseScroll} XHR response parsing failed, attempting DOM extraction fallback...`);
+            useDOMFallback = true;
+
+            // Take a screenshot for debugging
+            try {
+                const screenshot = await page.screenshot({ fullPage: false });
+                await Apify.setValue(`SCREENSHOT-FALLBACK-${Date.now()}`, screenshot, { contentType: 'image/png' });
+                log.info(`${logBaseScroll} Saved screenshot for debugging`);
+            } catch (e) {
+                log.warning(`${logBaseScroll} Failed to take screenshot: ${e.message}`);
+            }
+
+            // Extract places directly from DOM
+            const domPlaces = await extractPlacesFromDOM(page);
+            log.info(`${logBaseScroll} DOM extraction found ${domPlaces.length} places`);
+
+            if (domPlaces.length > 0) {
+                // Save debug info about what we found
+                await Apify.setValue('DOM-PLACES-DEBUG', domPlaces);
+
+                for (const domPlace of domPlaces) {
+                    // Create a place URL from the href
+                    let placeUrl = domPlace.href;
+                    if (!placeUrl.startsWith('http')) {
+                        placeUrl = `https://www.google.com${placeUrl}`;
+                    }
+
+                    const searchKey = searchString || request.url;
+                    if (!maxCrawledPlacesTracker.setEnqueued(searchKey)) {
+                        log.warning(`${logBaseScroll} Finishing search because we enqueued maxCrawledPlaces`);
+                        break;
+                    }
+
+                    const uniqueKey = domPlace.placeId || placeUrl;
+                    const { wasAlreadyPresent } = await requestQueue.addRequest({
+                        url: placeUrl,
+                        uniqueKey,
+                        userData: {
+                            label: LABELS.PLACE,
+                            searchString,
+                            rank: pageStats.totalEnqueued + 1,
+                            searchPageUrl: page.url(),
+                        },
+                    }, { forefront: true });
+
+                    if (!wasAlreadyPresent) {
+                        pageStats.totalEnqueued++;
+                        pageStats.enqueued++;
+                    }
+                }
+
+                log.info(`${logBaseScroll} DOM fallback enqueued ${pageStats.enqueued} places`);
+                return;
+            }
+        }
+
         // Check if we grabbed all results for this search
         // We also need to check that these were processed already so we don't finish too fast
-        const noMoreResults = await page.$('.HlvSq');
+        // Try multiple selectors for "end of results" indicator
+        const noMoreResults = await page.$('.HlvSq') ||
+            await page.$('[class*="end-of-list"]') ||
+            await page.$('span:contains("end of list")') ||
+            await page.evaluate(() => {
+                // Check if scrolling shows "You've reached the end" type message
+                const endMessages = document.body.innerText.match(/You've reached the end|No more results/i);
+                return !!endMessages;
+            });
         if (noMoreResults) {
-            
+
             log.info(`${logBase} Finishing search because we reached all ${pageStats.totalFound} results - ${request.url}`);
             return;
         }
@@ -367,8 +515,8 @@ module.exports.enqueueAllPlaceDetails = async ({
             await Apify.setValue(snapshotKey, pageStats.error.responseBody, { contentType: 'text/plain' });
             const snapshotUrl = `https://api.apify.com/v2/key-value-stores/${Apify.getEnv().defaultKeyValueStoreId}/records/ERROR-SNAPSHOTTER-STATE`
             throw `${logBaseScroll} Error occured, will retry the page: ${pageStats.error.message}\n`
-                + ` Storing response body for debugging: ${snapshotUrl}\n`
-                + `${request.url}`;
+            + ` Storing response body for debugging: ${snapshotUrl}\n`
+            + `${request.url}`;
         }
 
         if (!maxCrawledPlacesTracker.canEnqueueMore(searchString || request.url)) {
@@ -411,7 +559,7 @@ module.exports.enqueueAllPlaceDetails = async ({
 
         // We need to have mouse in the left scrolling panel
         await page.mouse.move(10, 300);
-        await page.waitForTimeout(100);
+        await delay(100);
         // scroll down the panel
         await page.mouse.wheel({ deltaY: 800 });
         // await waitForGoogleMapLoader(page);
@@ -419,9 +567,9 @@ module.exports.enqueueAllPlaceDetails = async ({
 
         // We wait between 2 and 3 sec to simulate real scrolling
         // It seems if we go faster than 2 sec, we sometimes miss some data (not sure why yet)
-        await page.waitForTimeout(2000 + Math.ceil(1000 * Math.random()))
+        await delay(2000 + Math.ceil(1000 * Math.random()))
 
-        placesCountInUI =  await getPlacesCountInUI(page);
-        await waiter(() => pageStats.totalFound >= placesCountInUI, { noThrow: true, timeout: 5000 }); 
+        placesCountInUI = await getPlacesCountInUI(page);
+        await waiter(() => pageStats.totalFound >= placesCountInUI, { noThrow: true, timeout: 5000 });
     }
 };

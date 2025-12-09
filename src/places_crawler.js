@@ -6,7 +6,7 @@ const typedefs = require('./typedefs'); // eslint-disable-line no-unused-vars
 const { enqueueAllPlaceDetails } = require('./enqueue_places');
 const { handlePlaceDetail } = require('./detail_page_handle');
 const {
-    waitAndHandleConsentScreen, waiter, blockRequestsForOptimization,
+    waitAndHandleConsentScreen, waiter, blockRequestsForOptimization, delay,
 } = require('./utils/misc-utils');
 const { LABELS } = require('./consts');
 
@@ -28,7 +28,7 @@ const handlePageFunctionExtended = async ({ pageContext, scrapingOptions, helper
 
     // TODO: Figure out how to remove the timeout and still handle consent screen
     // Handle consent screen, this wait is ok because we wait for selector later anyway
-    await page.waitForTimeout(5000);
+    await delay(5000);
 
     // @ts-ignore I'm not sure how we could fix the types here
     if (request.userData.waitingForConsent !== undefined) {
@@ -120,9 +120,23 @@ module.exports.setUpCrawler = ({ crawlerOptions, scrapingOptions, helperClasses 
                     
                 }
             */
-            // @ts-ignore
-            await page._client.send('Emulation.clearDeviceMetricsOverride');
-            
+            // Handle both old (page._client) and new (page._client()) puppeteer API
+            // Also handle cases where _client might not exist or send might not be available
+            try {
+                // @ts-ignore - _client is a private Puppeteer API that may not be in types
+                const clientRef = page._client;
+                if (clientRef) {
+                    const client = typeof clientRef === 'function' ? clientRef() : clientRef;
+                    if (client && typeof client.send === 'function') {
+                        await client.send('Emulation.clearDeviceMetricsOverride');
+                    }
+                }
+            } catch (err) {
+                // Silently fail if client API is not available - this is not critical
+                const errorMessage = err instanceof Error ? err.message : String(err);
+                log.debug(`Could not clear device metrics override: ${errorMessage}`);
+            }
+
             const mapUrl = new URL(request.url);
 
             await blockRequestsForOptimization(page, request.userData.label, maxImages, allPlacesNoSearchAction);
@@ -152,7 +166,7 @@ module.exports.setUpCrawler = ({ crawlerOptions, scrapingOptions, helperClasses 
                         log.warning('Consent screen loading, we need to approve first!');
                         // @ts-ignore
                         request.userData.waitingForConsent = true;
-                        await page.waitForTimeout(5000);
+                        await delay(5000);
                         const { persistCookiesPerSession } = options;
                         await waitAndHandleConsentScreen(page, request.url, persistCookiesPerSession, session);
                         // @ts-ignore

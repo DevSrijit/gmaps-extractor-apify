@@ -8,6 +8,54 @@ const { log } = utils;
 const { blockRequests } = Apify.utils.puppeteer;
 
 /**
+ * Delay helper function to replace deprecated page.waitForTimeout()
+ * @param {number} milliseconds - Time to wait in milliseconds
+ * @return {Promise<void>}
+ */
+module.exports.delay = (milliseconds) => {
+    return new Promise(resolve => setTimeout(resolve, milliseconds));
+};
+
+/**
+ * XPath query helper to replace deprecated page.$x()
+ * @param {Puppeteer.Page} page
+ * @param {string} xpath - XPath expression
+ * @return {Promise<Array<Puppeteer.ElementHandle>>}
+ */
+module.exports.$x = async (page, xpath) => {
+    // Use evaluateHandle to get elements via XPath
+    const result = await page.evaluateHandle((xpathExpr) => {
+        const iterator = document.evaluate(
+            xpathExpr,
+            document,
+            null,
+            XPathResult.ORDERED_NODE_ITERATOR_TYPE,
+            null
+        );
+        const nodes = [];
+        let node;
+        while ((node = iterator.iterateNext())) {
+            nodes.push(node);
+        }
+        return nodes;
+    }, xpath);
+
+    // Convert JSHandle array to ElementHandle array
+    // The result is a JSHandle containing an array of element handles
+    const properties = await result.getProperties();
+    const handles = [];
+    for (const [, value] of properties) {
+        // Convert JSHandle to ElementHandle if possible
+        const elementHandle = value.asElement();
+        if (elementHandle) {
+            handles.push(elementHandle);
+        }
+    }
+    await result.dispose();
+    return handles;
+};
+
+/**
  * Wait until google map loader disappear
  * @param {Puppeteer.Page} page
  * @return {Promise<void>}
@@ -28,7 +76,7 @@ module.exports.fixFloatNumber = (float) => Number(float.toFixed(7));
 /**
  * @param {Puppeteer.Page} page
  */
- module.exports.getScreenshotPinsFromExternalActor = async (page) => {
+module.exports.getScreenshotPinsFromExternalActor = async (page) => {
     const base64Image = await page.screenshot({ encoding: 'base64' });
     const ocrActorRun = await Apify.call('alexey/google-maps-pins-map-ocr', { base64Image, mapURL: page.url() }, { memoryMbytes: 256 });
     if (ocrActorRun?.status !== 'SUCCEEDED') {
@@ -121,7 +169,7 @@ const convertGoogleSheetsUrlToCsvDownload = (sheetUrl) => {
  * @returns {Promise<any[]>}
  */
 const fetchRowsFromCsvFile = async (downloadUrl) => {
-    const { body } = await utils.requestAsBrowser({ url: downloadUrl});
+    const { body } = await utils.requestAsBrowser({ url: downloadUrl });
     const rows = body.replace(/[";]/g, '').split('\n');
 
     return Array.from(new Set(rows));
@@ -132,7 +180,7 @@ const fetchRowsFromCsvFile = async (downloadUrl) => {
  * @param {string} fileUrl
  * @returns {boolean}
  */
- const isGoogleSpreadsheetFile = (fileUrl) => {
+const isGoogleSpreadsheetFile = (fileUrl) => {
     const googleSpreadsheetMatches = fileUrl.match(/docs.google.com\/spreadsheets/g);
     return googleSpreadsheetMatches?.length === 1;
 };
@@ -230,7 +278,7 @@ module.exports.parseZoomFromUrl = (url) => {
 const waiter = async (predicate, options = {}) => {
     const { timeout = 120000, pollInterval = 1000, timeoutErrorMeesage, successMessage, noThrow = false } = options;
     const start = Date.now();
-    for (;;) {
+    for (; ;) {
         if (await predicate()) {
             if (successMessage) {
                 log.info(successMessage);
@@ -347,9 +395,9 @@ module.exports.waitAndHandleConsentScreen = async (page, url, persistCookiesPerS
             // Without changing the domain, apify won't find the cookie later.
             // Changing the domain can duplicate cookies in the saved session state, so only the necessary cookie is saved here.
             if (cookies) {
-                let consentCookie = cookies.filter(cookie => cookie.name=="CONSENT")[0];
+                let consentCookie = cookies.filter(cookie => cookie.name == "CONSENT")[0];
                 // overwrite the pending cookie to make sure, we don't set the pending cookie when Apify is fixed
-                session.setPuppeteerCookies([{... consentCookie}], "https://www.google.com/");
+                session.setPuppeteerCookies([{ ...consentCookie }], "https://www.google.com/");
                 if (consentCookie) {
                     consentCookie.domain = "www.google.com"
                 }
@@ -421,10 +469,10 @@ module.exports.unstringifyGoogleXrhResponse = (googleResponseString) => {
 module.exports.blockRequestsForOptimization = async (page, label, maxImages, allPlacesNoSearchAction) => {
     // Blocking requests for optimizations
     // googleusercontent.com/p is the image file, the rest is needed for scrolling to work
-    const IMAGE_REQUIRED_URL_PATTERNS = ['googleusercontent.com/p' ];
+    const IMAGE_REQUIRED_URL_PATTERNS = ['googleusercontent.com/p'];
     const MAP_URL_PATTERNS = ['maps/vt', 'preview/log204', '/earth/BulkMetadata/', 'blob:https'];
 
-   
+
     const PLACE_NO_IMAGES_SETTINGS = { extraUrlPatterns: [...MAP_URL_PATTERNS, ...IMAGE_REQUIRED_URL_PATTERNS] };
     const PLACE_1_IMAGE_SETTING = { extraUrlPatterns: MAP_URL_PATTERNS };
     // TODO: Image scrolling is currently buggy (it jumps up) with any request blocking
@@ -440,7 +488,7 @@ module.exports.blockRequestsForOptimization = async (page, label, maxImages, all
     // Here we need the map 
     // TODO: This might fine-tuned if we try different options long enough but not a priority since it is rare
     const SEARCH_NO_SEARCHSTRING_SETTING = { urlPatterns: [] };
-    
+
     /** @type {{extraUrlPatterns?: string[], urlPatterns?: string[]}} */
     let blockRequestsOptions;
     if (label === LABELS.PLACE) {
@@ -460,7 +508,12 @@ module.exports.blockRequestsForOptimization = async (page, label, maxImages, all
     }
 
     // @ts-ignore
-    await blockRequests(page, blockRequestsOptions);
+    // Wrap in try-catch because Apify SDK's blockRequests may fail with newer puppeteer versions
+    try {
+        await blockRequests(page, blockRequestsOptions);
+    } catch (e) {
+        log.debug(`blockRequests failed (likely puppeteer version mismatch), continuing without request blocking: ${e.message}`);
+    }
 }
 
 module.exports.abortRunIfReachedMaxPlaces = async ({ searchString, request, page, crawler }) => {
@@ -468,6 +521,6 @@ module.exports.abortRunIfReachedMaxPlaces = async ({ searchString, request, page
         // + `currently: ${maxCrawledPlacesTracker.enqueuedPerSearch[searchKey]}(for this search)/${maxCrawledPlacesTracker.enqueuedTotal}(total) `
         + `--- ${searchString} - ${request.url}`);
     // We need to wait a bit so the pages got processed and data pushed
-    await page.waitForTimeout(5000);
+    await module.exports.delay(5000);
     await crawler.autoscaledPool?.abort();
 }
