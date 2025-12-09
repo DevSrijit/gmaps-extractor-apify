@@ -70,8 +70,19 @@ module.exports.waitForGoogleMapLoader = async (page) => {
     await page.waitForFunction(() => !document.querySelector('.loading-pane-section-loading'), { timeout: DEFAULT_TIMEOUT });
 };
 
-/** @param {number} float */
-module.exports.fixFloatNumber = (float) => Number(float.toFixed(7));
+/**
+ * Normalize float-like values to a rounded number.
+ * Google sometimes returns coordinates as strings or null, which would
+ * otherwise blow up when calling toFixed on them.
+ * @param {number | string | null | undefined} float
+ */
+module.exports.fixFloatNumber = (float) => {
+    const num = Number(float);
+    if (!Number.isFinite(num)) {
+        return null;
+    }
+    return Number(num.toFixed(7));
+};
 
 /**
  * @param {Puppeteer.Page} page
@@ -459,6 +470,9 @@ module.exports.normalizePlaceUrl = (url) => {
 module.exports.unstringifyGoogleXrhResponse = (googleResponseString) => {
     // Remove the )]}' prefix and any following whitespace/newlines
     let cleaned = googleResponseString.replace(/^\)\]\}\'[\s\n]*/, '').trim();
+    if (cleaned.endsWith('/*""*/')) {
+        cleaned = cleaned.substring(0, cleaned.length - 6);
+    }
     return JSON.parse(cleaned);
 };
 

@@ -48,8 +48,11 @@ module.exports.handlePlaceDetail = async (options) => {
     }
 
     try {
-        await page.waitForSelector(PLACE_TITLE_SEL, { timeout: DEFAULT_TIMEOUT });
+        // Some pages are slow to render the header, especially with heavy responses.
+        await page.waitForSelector(PLACE_TITLE_SEL, { timeout: DEFAULT_TIMEOUT * 2 });
     } catch (e) {
+        // Capture snapshot for debugging before retrying
+        await errorSnapshotter.saveSnapshot(page, 'PLACE-HEADER-TIMEOUT');
         session.markBad();
         throw 'The page header didn\'t load fast enough, this will be retried';
     }
