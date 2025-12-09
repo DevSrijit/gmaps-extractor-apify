@@ -1,0 +1,29 @@
+{
+  "searchStringsArray": [
+    "Real estate agents in Beverly Hills, CA"
+  ],
+  "maxCrawledPlacesPerSearch": 5,
+  "language": "en",
+  "exportPlaceUrls": false,
+  "includeHistogram": false,
+  "includeOpeningHours": false,
+  "includePeopleAlsoSearch": false,
+  "additionalInfo": false,
+  "maxImages": 0,
+  "maxReviews": 0,
+  "oneReviewPerRow": false,
+  "reviewsSort": "newest",
+  "reviewsTranslation": "originalAndTranslated",
+  "scrapeReviewerName": false,
+  "scrapeReviewerId": true,
+  "scrapeReviewerUrl": true,
+  "scrapeReviewId": true,
+  "scrapeReviewUrl": true,
+  "scrapeResponseFromOwnerText": true,
+  "countryCode": "us",
+  "city": "Beverly Hills",
+  "state": "CA",
+  "proxyConfig": {
+    "useApifyProxy": true
+  }
+}
