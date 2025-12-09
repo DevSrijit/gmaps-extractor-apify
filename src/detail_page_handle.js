@@ -51,10 +51,16 @@ module.exports.handlePlaceDetail = async (options) => {
         // Some pages are slow to render the header, especially with heavy responses.
         await page.waitForSelector(PLACE_TITLE_SEL, { timeout: DEFAULT_TIMEOUT * 2 });
     } catch (e) {
-        // Capture snapshot for debugging before retrying
-        await errorSnapshotter.saveSnapshot(page, 'PLACE-HEADER-TIMEOUT');
-        session.markBad();
-        throw 'The page header didn\'t load fast enough, this will be retried';
+        // First fallback: reload once and try again before giving up
+        await page.reload({ waitUntil: ['domcontentloaded', 'networkidle2'] });
+        try {
+            await page.waitForSelector(PLACE_TITLE_SEL, { timeout: DEFAULT_TIMEOUT * 1.5 });
+        } catch (e2) {
+            // Capture snapshot for debugging before retrying
+            await errorSnapshotter.saveSnapshot(page, 'PLACE-HEADER-TIMEOUT');
+            session.markBad();
+            throw 'The page header didn\'t load fast enough, this will be retried';
+        }
     }
 
     // Add info from listing page
