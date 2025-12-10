@@ -70,6 +70,15 @@ const handlePageFunctionExtended = async ({ pageContext, scrapingOptions, helper
             log.info(`[${label}]: Enqueuing places finished for --- ${searchString || ''} ${request.url}`);
             stats.maps();
         } else if (label === LABELS.PLACE) {
+            // Check if we've already reached the limit before processing this place
+            if (!maxCrawledPlacesTracker.canScrapeMore(searchString)) {
+                log.warning(`[${label}]: Skipping place because maxCrawledPlacesPerSearch limit reached for search "${searchString || ''}" --- ${request.url}`);
+                return;
+            }
+            if (!maxCrawledPlacesTracker.canScrapeMore()) {
+                log.warning(`[${label}]: Skipping place because maxCrawledPlaces limit reached --- ${request.url}`);
+                return;
+            }
             // Get data for place and save it to dataset
             log.info(`[${label}]: Extracting details from place url ${page.url()}`);
 
